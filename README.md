@@ -1,6 +1,7 @@
 # flight-delay-bigdata
 
-Plataforma analítica para predicción de retrasos aéreos y evaluación de rentabilidad de rutas, basada en datos públicos del BTS (Bureau of Transportation Statistics). Proyecto integrador del Magíster en Data Science, Universidad del Desarrollo 2026.
+Plataforma analítica para predicción de retrasos aéreos y evaluación de rentabilidad de rutas, basada en datos históricos del BTS (Bureau of Transportation Statistics). 
+Proyecto integrador del Magíster en Data Science, Universidad del Desarrollo 2026.
 
 **Integrantes:** María Vásquez Tapia · Camila Figueroa Muñoz · Diego Morales Valenzuela
 
@@ -8,49 +9,81 @@ Plataforma analítica para predicción de retrasos aéreos y evaluación de rent
 
 ## Sobre el proyecto
 
-La industria aérea genera millones de registros diarios de vuelos, retrasos y cancelaciones. Este pipeline procesa 26 millones de registros históricos (2022–2025) para identificar rutas con alto riesgo financiero y predecir retrasos sistémicos causados por clima o congestión aérea. El objetivo final es darle a los equipos de operaciones de las aerolíneas una herramienta para tomar decisiones estratégicas sobre qué rutas mantener, ajustar o cancelar.
+La industria aérea genera millones de registros diarios de vuelos, retrasos y cancelaciones. Este pipeline Lakehouse procesa más de 26 millones de registros históricos (2022–2025) para identificar rutas con alto riesgo financiero y predecir retrasos sistémicos causados por clima o congestión aérea. El objetivo final es proveer a los equipos de operaciones y gerencia una herramienta para tomar decisiones estratégicas fundamentadas en datos.
 
 ---
 
-## Arquitectura
+## Arquitectura (Medallion)
 
-El pipeline sigue una arquitectura Medallion sobre GCP:
+El pipeline implementa un enfoque Lakehouse desacoplando el almacenamiento del cómputo sobre Google Cloud Platform (GCP):
 
-```
+```text
 BTS / Kaggle CSV
       |
-   Bronze  →  Cloud Storage (CSV crudo, inmutable)
+   Bronze  →  Cloud Storage (Datos crudos inmutables, CSV)
       |
-   Silver  →  Cloud Storage (Parquet, particionado por YEAR/MONTH, PII hasheada)
+   Silver  →  Cloud Storage (Datos limpios y curados, Apache Parquet, particionado por YEAR/MONTH, PII hasheada)
       |
-    Gold   →  BigQuery (tablas agregadas para analítica)
+    Gold   →  BigQuery (Tablas analíticas agregadas, KPIs operacionales y métricas de riesgo)
       |
-   Looker Studio / Colab
+   Looker Studio / Jupyter Notebooks (Consumo Analítico)
 ```
 
-Servicios usados: Cloud Storage, Cloud Dataproc (PySpark), BigQuery, Cloud Composer (Airflow), Looker Studio.
+## Stack Tecnológico Final: 
+Cloud Storage (Data Lake), Cloud Dataproc con PySpark (Motor de procesamiento), BigQuery (Data Warehouse), Cloud Scheduler + Cloud Functions (Orquestación Batch), Looker Studio (BI).
 
 ---
 
-## Cómo ejecutar
+## Instrucciones de Instalación y Ejecución
 
-### Sin credenciales GCP (Google Colab)
+# Entorno de Desarrollo Limitado (Google Colab / Sin credenciales GCP)
+Para pruebas rápidas de la lógica de transformación:
 
-Abre el notebook en `notebooks/demo_pipeline_vuelos_produccion.ipynb` y ejecuta todas las celdas. Si no hay conexión a GCP, el pipeline genera automáticamente datos sintéticos con el mismo esquema del dataset real, así que todo funciona igual.
+- Abre el notebook ubicado en notebooks/demo_pipeline_vuelos_produccion.ipynb.
 
-### Con credenciales GCP
+- Ejecuta todas las celdas secuencialmente.
+Nota: Si no hay conexión a GCP, el pipeline generará automáticamente datos sintéticos con el mismo esquema del dataset real BTS para demostrar el flujo.
 
-1. Autenticarse: `gcloud auth application-default login`
-2. En la celda `bronze-code`, cambiar la URI del bucket:
+# Entorno de Producción (GCP)
+1. Clonar el repositorio y configurar credenciales locales:
+Bash: `gcloud auth application-default login`
+2. Instalar dependencias requeridas:
+Bash: `pip install pyspark==4.0.2`
+3. En la celda bronze-code del notebook/script principal, actualizar la URI apuntando a tu bucket de Cloud Storage:
    ```python
    uri_bronze = "gs://TU-BUCKET/bronze/vuelos_operacionales.csv"
    ```
-3. Ejecutar el notebook completo.
+Lanzar la ejecución del pipeline.
+---
+## Manual de Operación Final
+La plataforma está diseñada para operar bajo un modelo Batch Diario automatizado y basado en principios FinOps.
 
-**Requisito:**
-```bash
-pip install pyspark==4.0.2
-```
+- Orquestación: El flujo es gatillado diariamente mediante Cloud Scheduler, el cual invoca una Cloud Function.
+
+- Gestión de Infraestructura (Clústeres Efímeros): La Cloud Function despliega un clúster de Dataproc on-demand. Una vez que el job de PySpark finaliza la ingesta (Bronze -> Silver) y la carga (Silver -> Gold), el clúster se destruye automáticamente para evitar costos de inactividad 24/7.
+
+- Monitoreo y Observabilidad: Los logs de ejecución, alertas operacionales y métricas del pipeline deben ser monitoreados a través de Cloud Logging.
+
+- Gestión de Fallos: En caso de caída del pipeline, la inmutabilidad de la capa Bronze permite reprocesar la carga del día sin afectar el histórico, volviendo a ejecutar el job de Dataproc para esa partición específica de fecha.
+
+---
+## Datos de entrada y salida
+
+| Capa | Formato | Descripción |
+|------|---------|-------------|
+| Bronze | CSV (GCS) | Registros crudos originales de la BTS. Contiene fechas, aeropuertos, aerolíneas y causas de retraso (ej. Weather Delay, NASDelay). |
+| Silver | Apache Parquet (GCS) | Datos limpios y normalizados. Particionados físicamente por YEAR y MONTH para optimizar consultas I/O. Datos sensibles de pasajeros (PII) ofuscados con Hashing SHA-256. |
+| Gold | Tablas Nativas (BigQuery) | Estructuras altamente agregadas listas para consumo. Incluye: Atraso promedio, % de cancelación, percentiles (p90) y KPIs financieros/operacionales por ruta y temporada.|
+
+---
+
+## Gobierno, Seguridad y Optimizaciones
+
+- Seguridad y Privacidad: Control de acceso mediante políticas Least Privilege de IAM. Enmascaramiento de PII mediante Hashing criptográfico (SHA-256) aplicado en la capa Silver.
+
+- Optimización de Cómputo (Spark): Uso de Broadcast Joins para eliminar cuellos de botella de red (aceleración medida del 64.6%), implementación de .cache() estratégico y activación de Adaptive Query Execution (AQE).
+
+- Estrategia FinOps: La migración a formatos columnares (Parquet), particionamiento de datos, rightsizing de la orquestación (reemplazo de Composer por Scheduler+Functions) y el uso de clústeres efímeros lograron reducir el TCO proyectado en un 66% (reduciendo de $116.05 USD a $39.53 USD mensuales).
 
 ---
 
@@ -62,49 +95,10 @@ flight-delay-bigdata/
 ├── notebooks/
 │   └── demo_pipeline_vuelos_produccion.ipynb
 └── docs/
-    └── Fase-2-Informe.docx
+    └── Fase-3-Informe-Tecnico.docx
 ```
-
----
-
-## Datos de entrada y salida
-
-| Capa | Formato | Descripción |
-|------|---------|-------------|
-| Bronze | CSV | Registros crudos BTS — YEAR, MONTH, AIRLINE, ORIGIN, DEST, DEPARTURE_DELAY |
-| Silver | Parquet particionado por YEAR/MONTH | Datos limpios, PII hasheada con SHA-256 |
-| Gold | Tabla BigQuery | KPIs agregados por aerolínea, ruta y estacionalidad |
-
----
-
-## Optimizaciones implementadas
-
-- **Broadcast Join:** elimina el shuffle de red en los joins con tablas de dimensiones. Aceleración medida: 64.6%.
-- **Caching:** `dfsilver.cache()` evita re-computar la capa Silver en cada acción downstream.
-- **AQE activado:** `spark.sql.adaptive.enabled = true` para ajuste automático de particiones.
-- **Clústeres efímeros en Dataproc:** se crean solo durante el job y se destruyen al terminar, reduciendo el costo mensual en un 66% respecto a mantener infraestructura activa 24/7.
-
----
-
-## Gobierno y seguridad
-
-- Los datos de pasajeros (PII) se hashean con SHA-256 en la capa Silver. El dato crudo se elimina del DataFrame antes de cualquier escritura.
-- Control de acceso por roles IAM: los ingenieros de datos acceden a Bronze y Silver; los analistas de negocio tienen acceso solo a la capa Gold en BigQuery.
-- Linaje documentado: BTS → Bronze (Cloud Storage) → Silver (Spark/Dataproc) → Gold (BigQuery).
-
----
-
-## Estimación de costos mensuales (GCP)
-
-| Escenario | Costo USD/mes |
-|-----------|--------------|
-| Baseline | $116.05 |
-| + Rightsizing de orquestación | $51.20 |
-| + Clústeres efímeros | $39.53 |
-
 ---
 
 ## Declaración de uso de IA
 
 Se usaron Gemini y ChatGPT para estructurar partes de la propuesta, refinar redacción y co-diseñar el esquema de arquitectura. El contenido fue revisado y es responsabilidad del equipo.
-
