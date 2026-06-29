@@ -1,21 +1,20 @@
 # src/main.py
-import sys
-from utils import get_spark_session
-from jobs import bronze_to_silver, silver_to_gold
+from src.utils import get_spark_session
+from src.jobs import bronze_to_silver, silver_to_gold
 
 def main():
-    # Inicializar sesión Spark
     spark = get_spark_session()
+    print(f"Motor PySpark inicializado. Versión: {spark.version}")
     
     try:
-        # Ejecutar Pipeline secuencialmente
+        # Ejecución Celda 2 y 3
         bronze_to_silver.run(spark)
+        
+        # Ejecución Celda 4 y 5
         silver_to_gold.run(spark)
         
-    except Exception as e:
-        print(f"Error en la ejecución del pipeline: {e}")
-        sys.exit(1)
     finally:
+        # Cierre limpio (Celda 5)
         spark.stop()
 
 if __name__ == "__main__":

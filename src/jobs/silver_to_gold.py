@@ -1,31 +1,45 @@
 # src/jobs/silver_to_gold.py
-from pyspark.sql.functions import avg, count, broadcast, expr
-from config import SILVER_PATH, GOLD_TABLE_KPIS
+from pyspark.sql import functions as F
+import time
+from src.config import OUTPUT_PATH_SILVER
 
 def run(spark):
-    print("Iniciando capa Silver a Gold...")
-    
-    # 1. Leer Parquet desde Silver
-    df_silver = spark.read.parquet(SILVER_PATH)
-    
-    # Usar .cache() si el dataframe se usará para múltiples tablas Gold
+    # Leer el DataFrame guardado en Silver para simular el paso entre capas
+    df_silver = spark.read.parquet(OUTPUT_PATH_SILVER)
     df_silver.cache()
     
-    # 2. Lógica de negocio (Ej: Atrasos promedios y % de cancelación por ruta)
-    # Aquí puedes incluir tu optimización con "broadcast(df_dimension_aeropuertos)"
-    
-    df_gold = df_silver.groupBy("ORIGIN", "DEST").agg(
-        avg("DEP_DELAY").alias("avg_delay"),
-        (sum(expr("CAST(CANCELLED AS INT)")) / count("*") * 100).alias("cancellation_pct")
-    )
-    
-    # 3. Escritura a BigQuery
-    # Nota: Requiere tener configurado el conector de BQ en el clúster de Dataproc
-    (df_gold.write
-     .format("bigquery")
-     .option("table", GOLD_TABLE_KPIS)
-     .option("temporaryGcsBucket", "TU-BUCKET-TEMP-BQ")
-     .mode("overwrite")
-     .save())
-     
-    print("Capa Gold actualizada exitosamente en BigQuery.")
+    dim_airlines = spark.createDataFrame([
+        ("AA", "American Airlines"),
+        ("DL", "Delta Air Lines"),
+        ("UA", "United Airlines"),
+        ("WN", "Southwest Airlines")
+    ], ["AIRLINE", "AIRLINE_NAME"])
+
+    # --- ESCENARIO A: SIN OPTIMIZACIÓN (Join Estándar con Shuffle) ---
+    t0 = time.time()
+    df_gold_standard = df_silver.join(dim_airlines, "AIRLINE", "left") \
+                                .groupBy("AIRLINE_NAME", "ORIGIN_AIRPORT", "DESTINATION_AIRPORT") \
+                                .agg(F.avg("DEPARTURE_DELAY").alias("promedio_retraso_min"))
+    df_gold_standard.collect() # Acción para gatillar el plan
+    time_standard = time.time() - t0
+
+    # --- ESCENARIO B: CON OPTIMIZACIÓN (Broadcast Join) ---
+    t1 = time.time()
+    df_gold_optimized = df_silver.join(F.broadcast(dim_airlines), "AIRLINE", "left") \
+                                 .groupBy("AIRLINE_NAME", "ORIGIN_AIRPORT", "DESTINATION_AIRPORT") \
+                                 .agg(F.avg("DEPARTURE_DELAY").alias("promedio_retraso_min"))
+    df_gold_optimized.collect() # Acción para gatillar el plan
+    time_optimized = time.time() - t1
+
+    print("=" * 55)
+    print(" MÉTRICAS DE OPTIMIZACIÓN DE RENDIMIENTO (FINOPS)")
+    print("=" * 55)
+    print(f" Tiempo ANTES (Join Pobre con Shuffle):   {time_standard:.4f} seg")
+    print(f" Tiempo DESPUÉS (Uso de Broadcast Join):  {time_optimized:.4f} seg")
+    # Manejo de división por cero en caso de que time_standard sea 0
+    if time_standard > 0:
+        print(f" Aceleración de procesamiento:            {((time_standard - time_optimized) / time_standard) * 100:.1f}%")
+
+    # --- AUDITORÍA Y LIMPIEZA (Celda 5 del notebook) ---
+    df_gold_optimized.explain(True)
+    df_silver.unpersist()
